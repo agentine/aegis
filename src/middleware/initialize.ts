@@ -42,26 +42,40 @@ export function createInitializeMiddleware(
 
       const shouldSession = options.session !== false;
       if (shouldSession && req.session) {
-        authenticator
-          ._serializeUser(user as never)
-          .then((serialized: string | number) => {
-            if (!req.session) {
-              return cb(new Error('No session available'));
-            }
-            if (!req.session.passport) {
-              req.session.passport = {};
-            }
-            req.session.passport.user = serialized;
+        const storeUser = () => {
+          authenticator
+            ._serializeUser(user as never)
+            .then((serialized: string | number) => {
+              if (!req.session) {
+                return cb(new Error('No session available'));
+              }
+              if (!req.session.passport) {
+                req.session.passport = {};
+              }
+              req.session.passport.user = serialized;
 
-            if (typeof req.session.save === 'function') {
-              req.session.save((err) => {
-                cb(err || null);
-              });
-            } else {
-              cb(null);
+              if (typeof req.session.save === 'function') {
+                req.session.save((err) => {
+                  cb(err || null);
+                });
+              } else {
+                cb(null);
+              }
+            })
+            .catch((err: Error) => cb(err));
+        };
+
+        // Regenerate session to prevent session fixation attacks.
+        if (typeof req.session.regenerate === 'function') {
+          req.session.regenerate((err) => {
+            if (err) {
+              return cb(err);
             }
-          })
-          .catch((err: Error) => cb(err));
+            storeUser();
+          });
+        } else {
+          storeUser();
+        }
       } else {
         cb(null);
       }
