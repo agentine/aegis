@@ -86,18 +86,21 @@ export function createInitializeMiddleware(
       optionsOrDone?: LogoutOptions | DoneCallback<void>,
       done?: DoneCallback<void>,
     ): void {
+      let options: LogoutOptions;
       let cb: DoneCallback<void>;
 
       if (typeof optionsOrDone === 'function') {
+        options = {};
         cb = optionsOrDone;
       } else {
+        options = optionsOrDone || {};
         cb = done || (() => {});
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (req as any)[userProp] = undefined;
 
-      if (req.session?.passport) {
+      if (req.session?.passport && !options.keepSessionInfo) {
         delete req.session.passport.user;
       }
 

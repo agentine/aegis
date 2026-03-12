@@ -126,7 +126,7 @@ export class Authenticator<User = unknown> {
     }
     return this.authenticate('session', {
       session: false,
-      ...(options?.optional ? {} : {}),
+      optional: options?.optional,
     });
   }
 

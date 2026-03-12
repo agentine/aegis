@@ -40,6 +40,7 @@ export type VerifyFn<User> = VerifyCallback<User> | VerifyAsync<User>;
 
 export interface AuthenticateOptions {
   session?: boolean;
+  optional?: boolean;
   successRedirect?: string;
   failureRedirect?: string;
   failureMessage?: string | boolean;
