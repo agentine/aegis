@@ -100,7 +100,14 @@ export function createInitializeMiddleware(
       if (req.session?.passport) {
         delete req.session.passport.user;
       }
-      cb(null);
+
+      if (req.session && typeof req.session.save === 'function') {
+        req.session.save((err) => {
+          cb(err || null);
+        });
+      } else {
+        cb(null);
+      }
     }
 
     function isAuthenticated(): boolean {
