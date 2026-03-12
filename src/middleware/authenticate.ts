@@ -103,8 +103,16 @@ export function createAuthenticateMiddleware(
         },
 
         redirect(url: string, status?: number) {
-          res.writeHead(status || 302, { Location: url });
-          res.end();
+          // Validate redirect URL to prevent open redirect attacks.
+          // Only allow relative paths or same-origin URLs.
+          if (url.startsWith('/') && !url.startsWith('//')) {
+            res.writeHead(status || 302, { Location: url });
+            res.end();
+          } else {
+            // Reject absolute URLs and protocol-relative URLs.
+            res.writeHead(400, { 'Content-Type': 'text/plain' });
+            res.end('Invalid redirect URL');
+          }
         },
 
         pass() {
