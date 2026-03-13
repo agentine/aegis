@@ -165,7 +165,7 @@ export interface SAMLStrategyOptions {
   entryPoint: string;
   issuer: string;
   callbackURL: string;
-  cert?: string;
+  cert: string;
 }
 
 /**
@@ -180,11 +180,14 @@ export class SAMLStrategy<User = unknown> extends Strategy {
   private _entryPoint: string;
   private _issuer: string;
   private _callbackURL: string;
-  private _cert?: string;
+  private _cert: string;
   private _verify: SAMLVerifyFn<User>;
 
   constructor(options: SAMLStrategyOptions, verify: SAMLVerifyFn<User>) {
     super();
+    if (!options.cert) {
+      throw new Error('SAML cert is required for signature verification');
+    }
     this._entryPoint = options.entryPoint;
     this._issuer = options.issuer;
     this._callbackURL = options.callbackURL;
@@ -196,15 +199,21 @@ export class SAMLStrategy<User = unknown> extends Strategy {
     const body = (req as unknown as { body?: Record<string, string> }).body;
 
     if (body?.SAMLResponse) {
-      return this._handleResponse(body.SAMLResponse);
+      return this._handleResponse(req, body.SAMLResponse);
     }
 
     // Initiate SAML flow: redirect to IdP.
-    return this._redirectToIdP();
+    return this._redirectToIdP(req);
   }
 
-  private _redirectToIdP(): void {
+  private _redirectToIdP(req: AegisRequest): void {
     const requestId = `_${randomUUID()}`;
+
+    // Store the AuthnRequest ID in session for InResponseTo validation.
+    if (req.session) {
+      (req.session as Record<string, unknown>)['saml:requestId'] = requestId;
+    }
+
     const samlRequest = Buffer.from(
       `<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ` +
         `ID="${requestId}" Version="2.0" IssueInstant="${new Date().toISOString()}" ` +
@@ -216,15 +225,19 @@ export class SAMLStrategy<User = unknown> extends Strategy {
     this.redirect(`${this._entryPoint}?${params.toString()}`);
   }
 
-  private async _handleResponse(samlResponse: string): Promise<void> {
+  private async _handleResponse(req: AegisRequest, samlResponse: string): Promise<void> {
     try {
       const xml = Buffer.from(samlResponse, 'base64').toString('utf8');
       const doc = parseXML(xml);
 
-      // Verify XML signature if a certificate is configured.
-      if (this._cert) {
-        this._verifySignature(doc, xml);
-      }
+      // Validate InResponseTo matches our stored AuthnRequest ID.
+      this._validateInResponseTo(req, doc);
+
+      // Validate Destination matches our ACS URL.
+      this._validateDestination(doc);
+
+      // Verify XML signature (cert is required).
+      this._verifySignature(doc, xml);
 
       const profile = this._extractProfile(doc);
 
@@ -234,6 +247,39 @@ export class SAMLStrategy<User = unknown> extends Strategy {
       await this._callVerify(profile);
     } catch (err) {
       this.error(err as Error);
+    }
+  }
+
+  /**
+   * Validate InResponseTo attribute matches the stored AuthnRequest ID.
+   */
+  private _validateInResponseTo(req: AegisRequest, doc: SAXElement): void {
+    const response = findElement(doc, 'Response') || doc;
+    const inResponseTo = response.attrs?.InResponseTo;
+
+    if (req.session) {
+      const storedRequestId = (req.session as Record<string, unknown>)['saml:requestId'] as string | undefined;
+      delete (req.session as Record<string, unknown>)['saml:requestId'];
+
+      if (storedRequestId && inResponseTo && inResponseTo !== storedRequestId) {
+        throw new Error(
+          `SAML InResponseTo mismatch: expected ${storedRequestId}, got ${inResponseTo}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Validate Destination attribute matches our ACS URL.
+   */
+  private _validateDestination(doc: SAXElement): void {
+    const response = findElement(doc, 'Response') || doc;
+    const destination = response.attrs?.Destination;
+
+    if (destination && destination !== this._callbackURL) {
+      throw new Error(
+        `SAML Destination mismatch: expected ${this._callbackURL}, got ${destination}`,
+      );
     }
   }
 
@@ -274,7 +320,7 @@ export class SAMLStrategy<User = unknown> extends Strategy {
       'base64',
     );
 
-    const cert = this._formatCert(this._cert!);
+    const cert = this._formatCert(this._cert);
     const verifier = createVerify(nodeAlg);
     verifier.update(signedInfoXml);
     if (!verifier.verify(cert, signatureValue)) {

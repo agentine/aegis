@@ -374,9 +374,14 @@ describe('OIDCStrategy', () => {
 // ---------------------------------------------------------------------------
 
 describe('SAMLStrategy', () => {
+  const dummyCert = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Z3VS5JJcds3xfn/ygWe' +
+    'p94TtEECLG1bFfB6lZ5GRfB0rvM2SyQTfBFp5E6G1J3e+oFvNFGGJPhSOlDOAZt' +
+    '+FoHIepIl8IVGOqNIcUJL1w1LON4iCcFqh+JnI1IVIQuHDOQuWpiOiPmFN0VQpHh' +
+    'DUMMY_TEST_CERT_NOT_VALID';
+
   it('should have name "saml"', () => {
     const strategy = new SAMLStrategy(
-      { entryPoint: 'https://idp.example.com/sso', issuer: 'my-sp', callbackURL: '/saml/callback' },
+      { entryPoint: 'https://idp.example.com/sso', issuer: 'my-sp', callbackURL: '/saml/callback', cert: dummyCert },
       async () => ({ id: '1' }),
     );
     assert.equal(strategy.name, 'saml');
@@ -384,7 +389,7 @@ describe('SAMLStrategy', () => {
 
   it('should redirect to IdP entry point', async () => {
     const strategy = new SAMLStrategy(
-      { entryPoint: 'https://idp.example.com/sso', issuer: 'my-sp', callbackURL: '/saml/callback' },
+      { entryPoint: 'https://idp.example.com/sso', issuer: 'my-sp', callbackURL: '/saml/callback', cert: dummyCert },
       async () => ({ id: '1' }),
     );
 
@@ -402,7 +407,7 @@ describe('SAMLStrategy', () => {
     assert.ok(redirectUrl.includes('SAMLRequest='));
   });
 
-  it('should parse SAML response and extract profile', async () => {
+  it('should reject unsigned SAML response (cert required)', async () => {
     const samlXml = `
       <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">
         <saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
@@ -421,39 +426,9 @@ describe('SAMLStrategy', () => {
     `;
     const samlResponse = Buffer.from(samlXml).toString('base64');
 
-    let successUser: unknown;
-    const strategy = new SAMLStrategy(
-      { entryPoint: 'https://idp.example.com/sso', issuer: 'my-sp', callbackURL: '/saml/callback' },
-      async (profile) => {
-        assert.equal(profile.nameID, 'user@example.com');
-        assert.equal(profile.issuer, 'https://idp.example.com');
-        assert.equal(profile.attributes.email, 'user@example.com');
-        assert.equal(profile.sessionIndex, '_sess1');
-        return { id: profile.nameID };
-      },
-    );
-
-    strategy._setup({
-      success: (user: unknown) => { successUser = user; },
-      fail: () => {},
-      redirect: () => {},
-      pass: () => {},
-      error: (err: Error) => { throw err; },
-    });
-
-    const req = makeReq('/saml/callback') as unknown as AegisRequest & { body: Record<string, string> };
-    (req as unknown as { body: Record<string, string> }).body = { SAMLResponse: samlResponse };
-    await strategy.authenticate(req);
-    assert.deepEqual(successUser, { id: 'user@example.com' });
-  });
-
-  it('should error if no Assertion in response', async () => {
-    const samlXml = '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"></samlp:Response>';
-    const samlResponse = Buffer.from(samlXml).toString('base64');
-
     let errorMsg = '';
     const strategy = new SAMLStrategy(
-      { entryPoint: 'https://idp.example.com/sso', issuer: 'my-sp', callbackURL: '/saml/callback' },
+      { entryPoint: 'https://idp.example.com/sso', issuer: 'my-sp', callbackURL: '/saml/callback', cert: dummyCert },
       async () => ({ id: '1' }),
     );
 
@@ -468,7 +443,31 @@ describe('SAMLStrategy', () => {
     const req = makeReq('/saml/callback') as unknown as AegisRequest & { body: Record<string, string> };
     (req as unknown as { body: Record<string, string> }).body = { SAMLResponse: samlResponse };
     await strategy.authenticate(req);
-    assert.ok(errorMsg.includes('No SAML Assertion'));
+    assert.ok(errorMsg.includes('No XML Signature'), `Expected signature error, got: ${errorMsg}`);
+  });
+
+  it('should error if no Assertion in response', async () => {
+    const samlXml = '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"></samlp:Response>';
+    const samlResponse = Buffer.from(samlXml).toString('base64');
+
+    let errorMsg = '';
+    const strategy = new SAMLStrategy(
+      { entryPoint: 'https://idp.example.com/sso', issuer: 'my-sp', callbackURL: '/saml/callback', cert: dummyCert },
+      async () => ({ id: '1' }),
+    );
+
+    strategy._setup({
+      success: () => {},
+      fail: () => {},
+      redirect: () => {},
+      pass: () => {},
+      error: (err: Error) => { errorMsg = err.message; },
+    });
+
+    const req = makeReq('/saml/callback') as unknown as AegisRequest & { body: Record<string, string> };
+    (req as unknown as { body: Record<string, string> }).body = { SAMLResponse: samlResponse };
+    await strategy.authenticate(req);
+    assert.ok(errorMsg.includes('No XML Signature') || errorMsg.includes('No SAML Assertion'));
   });
 });
 

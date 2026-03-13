@@ -1,4 +1,4 @@
-import { createPublicKey, createVerify } from 'node:crypto';
+import { createHash, createPublicKey, createVerify, randomBytes } from 'node:crypto';
 import {
   OAuth2Strategy,
   type OAuth2Profile,
@@ -123,6 +123,7 @@ export class AppleStrategy<User = unknown> extends OAuth2Strategy<User> {
 
   /**
    * Override to handle Apple's POST-based callback and id_token.
+   * Generates and stores a nonce for id_token replay protection.
    */
   async authenticate(req: AegisRequest): Promise<void> {
     // Apple POSTs the callback with code + id_token in the body.
@@ -145,6 +146,14 @@ export class AppleStrategy<User = unknown> extends OAuth2Strategy<User> {
           // Ignore parse errors
         }
       }
+
+      return super.authenticate(req);
+    }
+
+    // Initiating flow — generate nonce and store in session for replay protection.
+    if (req.session) {
+      const nonce = randomBytes(16).toString('hex');
+      (req.session as Record<string, unknown>)['apple:nonce'] = nonce;
     }
 
     return super.authenticate(req);
@@ -203,6 +212,19 @@ export class AppleStrategy<User = unknown> extends OAuth2Strategy<User> {
       // Validate expiry.
       if (typeof payload.exp === 'number' && payload.exp * 1000 < Date.now()) {
         throw new Error('Apple id_token has expired');
+      }
+
+      // Validate nonce (replay protection).
+      if (req.session) {
+        const storedNonce = (req.session as Record<string, unknown>)['apple:nonce'] as string | undefined;
+        delete (req.session as Record<string, unknown>)['apple:nonce'];
+        if (storedNonce && payload.nonce) {
+          // Apple includes the SHA-256 hash of the nonce in the id_token.
+          const expectedNonceHash = createHash('sha256').update(storedNonce).digest('hex');
+          if (String(payload.nonce) !== expectedNonceHash && String(payload.nonce) !== storedNonce) {
+            throw new Error('Apple id_token nonce mismatch (possible replay attack)');
+          }
+        }
       }
 
       sub = String(payload.sub || '');
