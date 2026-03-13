@@ -104,12 +104,17 @@ export function createAuthenticateMiddleware(
 
         redirect(url: string, status?: number) {
           // Validate redirect URL to prevent open redirect attacks.
-          // Only allow relative paths or same-origin URLs.
-          if (url.startsWith('/') && !url.startsWith('//')) {
+          // Allow: relative paths, https:// URLs (strategy-initiated provider
+          // redirects), and http://localhost for development.
+          // Block: protocol-relative URLs (//evil.com), javascript:, data:, etc.
+          const isRelative = url.startsWith('/') && !url.startsWith('//');
+          const isHttps = url.startsWith('https://');
+          const isLocalhost = url.startsWith('http://localhost');
+          if (isRelative || isHttps || isLocalhost) {
             res.writeHead(status || 302, { Location: url });
             res.end();
           } else {
-            // Reject absolute URLs and protocol-relative URLs.
+            // Reject protocol-relative URLs and non-https schemes.
             res.writeHead(400, { 'Content-Type': 'text/plain' });
             res.end('Invalid redirect URL');
           }
