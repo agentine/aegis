@@ -37,9 +37,13 @@ export class FacebookStrategy<User = unknown> extends OAuth2Strategy<User> {
 
   async userProfile(accessToken: string): Promise<OAuth2Profile> {
     const fields = this._profileFields.join(',');
-    const url = `https://graph.facebook.com/v18.0/me?fields=${fields}&access_token=${accessToken}`;
+    const url = `https://graph.facebook.com/v18.0/me?fields=${fields}`;
 
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
 
     if (!res.ok) {
       throw new Error(`Facebook graph request failed (${res.status})`);

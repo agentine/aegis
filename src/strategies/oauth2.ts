@@ -84,6 +84,9 @@ export class OAuth2Strategy<User = unknown> extends Strategy {
     const errorParam = url.searchParams.get('error');
 
     if (errorParam) {
+      // Clean up stored state and PKCE verifier on error to avoid stale session data.
+      this._removeFromSession(req, 'oauth2:state');
+      this._removeFromSession(req, 'oauth2:code_verifier');
       return this.fail({ message: url.searchParams.get('error_description') || errorParam });
     }
 
@@ -183,9 +186,12 @@ export class OAuth2Strategy<User = unknown> extends Strategy {
     if (this._usePKCE) {
       const verifier = this._loadFromSession(req, 'oauth2:code_verifier');
       this._removeFromSession(req, 'oauth2:code_verifier');
-      if (verifier) {
-        body.code_verifier = verifier;
+      if (!verifier) {
+        throw new Error(
+          'PKCE code_verifier not found in session. The session may have expired or session middleware may be misconfigured.',
+        );
       }
+      body.code_verifier = verifier;
     }
 
     const res = await fetch(this._tokenURL, {
@@ -198,8 +204,7 @@ export class OAuth2Strategy<User = unknown> extends Strategy {
     });
 
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Token exchange failed (${res.status}): ${text}`);
+      throw new Error(`Token exchange failed (${res.status})`);
     }
 
     const contentType = res.headers.get('content-type') || '';
@@ -245,8 +250,7 @@ export class OAuth2Strategy<User = unknown> extends Strategy {
     });
 
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Token refresh failed (${res.status}): ${text}`);
+      throw new Error(`Token refresh failed (${res.status})`);
     }
 
     return await res.json() as Record<string, string>;
@@ -293,9 +297,12 @@ export class OAuth2Strategy<User = unknown> extends Strategy {
   // --- Session helpers ---
 
   private _storeInSession(req: AegisRequest, key: string, value: string): void {
-    if (req.session) {
-      (req.session as Record<string, unknown>)[key] = value;
+    if (!req.session) {
+      throw new Error(
+        'OAuth2 requires session support. Ensure session middleware is configured before authentication.',
+      );
     }
+    (req.session as Record<string, unknown>)[key] = value;
   }
 
   private _loadFromSession(req: AegisRequest, key: string): string | undefined {
