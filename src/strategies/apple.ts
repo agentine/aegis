@@ -1,9 +1,90 @@
+import { createPublicKey, createVerify } from 'node:crypto';
 import {
   OAuth2Strategy,
   type OAuth2Profile,
   type OAuth2VerifyFn,
 } from './oauth2.js';
 import type { AegisRequest } from '../types.js';
+
+// ---- Apple JWKS helpers (zero-dependency JWT signature verification) ----
+
+interface AppleJWK {
+  kty: string;
+  kid: string;
+  use: string;
+  alg: string;
+  n: string;
+  e: string;
+}
+
+interface AppleJWKS {
+  keys: AppleJWK[];
+}
+
+const APPLE_JWKS_URL = 'https://appleid.apple.com/auth/keys';
+const JWKS_CACHE_TTL_MS = 3600_000; // 1 hour
+
+let _jwksCache: { keys: AppleJWK[]; fetchedAt: number } | null = null;
+
+async function fetchAppleJWKS(): Promise<AppleJWK[]> {
+  if (_jwksCache && Date.now() - _jwksCache.fetchedAt < JWKS_CACHE_TTL_MS) {
+    return _jwksCache.keys;
+  }
+  const res = await fetch(APPLE_JWKS_URL);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch Apple JWKS (${res.status})`);
+  }
+  const jwks = (await res.json()) as AppleJWKS;
+  _jwksCache = { keys: jwks.keys, fetchedAt: Date.now() };
+  return jwks.keys;
+}
+
+function verifyAppleJWT(idToken: string, keys: AppleJWK[]): Record<string, unknown> {
+  const parts = idToken.split('.');
+  if (parts.length !== 3) {
+    throw new Error('Apple id_token is not a valid JWT');
+  }
+
+  // Decode header to find kid and alg.
+  const header = JSON.parse(
+    Buffer.from(parts[0], 'base64url').toString('utf8'),
+  ) as { kid?: string; alg?: string };
+
+  if (!header.kid || !header.alg) {
+    throw new Error('Apple id_token header missing kid or alg');
+  }
+
+  // Only RS256 is expected from Apple.
+  if (header.alg !== 'RS256') {
+    throw new Error(`Unsupported Apple id_token algorithm: ${header.alg}`);
+  }
+
+  // Find matching key.
+  const jwk = keys.find((k) => k.kid === header.kid);
+  if (!jwk) {
+    throw new Error(`No Apple JWKS key found for kid: ${header.kid}`);
+  }
+
+  // Import JWK as a Node.js public key.
+  const publicKey = createPublicKey({
+    key: { kty: jwk.kty, n: jwk.n, e: jwk.e },
+    format: 'jwk',
+  });
+
+  // Verify RS256 signature.
+  const signatureInput = `${parts[0]}.${parts[1]}`;
+  const signature = Buffer.from(parts[2], 'base64url');
+  const verifier = createVerify('RSA-SHA256');
+  verifier.update(signatureInput);
+  if (!verifier.verify(publicKey, signature)) {
+    throw new Error('Apple id_token signature verification failed');
+  }
+
+  // Signature valid — decode payload.
+  return JSON.parse(
+    Buffer.from(parts[1], 'base64url').toString('utf8'),
+  ) as Record<string, unknown>;
+}
 
 export interface AppleStrategyOptions {
   clientID: string;
@@ -101,45 +182,35 @@ export class AppleStrategy<User = unknown> extends OAuth2Strategy<User> {
     let sub = '';
     let email = '';
 
-    // Decode and validate id_token JWT payload.
+    // Verify and decode id_token JWT with cryptographic signature check.
     if (tokenData.id_token) {
-      const parts = tokenData.id_token.split('.');
-      if (parts.length === 3) {
-        try {
-          const payload = JSON.parse(
-            Buffer.from(parts[1], 'base64url').toString('utf8'),
-          ) as Record<string, unknown>;
+      // Fetch Apple's public keys and verify the JWT signature.
+      const appleKeys = await fetchAppleJWKS();
+      const payload = verifyAppleJWT(tokenData.id_token, appleKeys);
 
-          // Validate issuer and audience claims.
-          if (payload.iss !== 'https://appleid.apple.com') {
-            throw new Error(
-              `Apple id_token issuer mismatch: expected https://appleid.apple.com, got ${String(payload.iss)}`,
-            );
-          }
-          if (payload.aud !== this._appleClientID) {
-            throw new Error(
-              `Apple id_token audience mismatch: expected ${this._appleClientID}, got ${String(payload.aud)}`,
-            );
-          }
-
-          // Validate expiry.
-          if (typeof payload.exp === 'number' && payload.exp * 1000 < Date.now()) {
-            throw new Error('Apple id_token has expired');
-          }
-
-          sub = String(payload.sub || '');
-          email = String(payload.email || '');
-
-          tokenData._apple_sub = sub;
-          tokenData._apple_email = email;
-          tokenData._apple_email_verified = String(payload.email_verified || '');
-        } catch (err) {
-          if (err instanceof Error && err.message.startsWith('Apple id_token')) {
-            throw err; // Re-throw validation errors
-          }
-          // If JWT decode fails, continue without profile data
-        }
+      // Validate issuer and audience claims.
+      if (payload.iss !== 'https://appleid.apple.com') {
+        throw new Error(
+          `Apple id_token issuer mismatch: expected https://appleid.apple.com, got ${String(payload.iss)}`,
+        );
       }
+      if (payload.aud !== this._appleClientID) {
+        throw new Error(
+          `Apple id_token audience mismatch: expected ${this._appleClientID}, got ${String(payload.aud)}`,
+        );
+      }
+
+      // Validate expiry.
+      if (typeof payload.exp === 'number' && payload.exp * 1000 < Date.now()) {
+        throw new Error('Apple id_token has expired');
+      }
+
+      sub = String(payload.sub || '');
+      email = String(payload.email || '');
+
+      tokenData._apple_sub = sub;
+      tokenData._apple_email = email;
+      tokenData._apple_email_verified = String(payload.email_verified || '');
     }
 
     // Capture first-login user data from request body.
