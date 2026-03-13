@@ -62,6 +62,26 @@ export class OIDCStrategy<User = unknown> extends OAuth2Strategy<User> {
 
     const config = (await res.json()) as OIDCConfiguration;
 
+    // Validate discovered issuer matches configured issuer.
+    // Allow localhost without port matching for development environments.
+    if (config.issuer) {
+      const discoveredIssuer = config.issuer.replace(/\/+$/, '');
+      const configuredBase = this._issuer.replace(/:\d+$/, '');
+      const discoveredBase = discoveredIssuer.replace(/:\d+$/, '');
+      if (discoveredBase !== configuredBase && discoveredIssuer !== this._issuer) {
+        throw new Error(
+          `OIDC issuer mismatch: expected ${this._issuer}, discovered ${config.issuer}`,
+        );
+      }
+    }
+
+    // Validate discovered endpoints use HTTPS in production.
+    for (const endpoint of [config.authorization_endpoint, config.token_endpoint, config.userinfo_endpoint]) {
+      if (endpoint && !endpoint.startsWith('https://') && !endpoint.startsWith('http://localhost')) {
+        throw new Error(`OIDC endpoint must use HTTPS: ${endpoint}`);
+      }
+    }
+
     this._authorizationURL = config.authorization_endpoint;
     this._tokenURL = config.token_endpoint;
     this._userinfoEndpoint = config.userinfo_endpoint;

@@ -1,3 +1,4 @@
+import { createHash, createVerify, randomUUID } from 'node:crypto';
 import { Strategy } from '../strategy.js';
 import type { AegisRequest, DoneCallback } from '../types.js';
 
@@ -203,9 +204,10 @@ export class SAMLStrategy<User = unknown> extends Strategy {
   }
 
   private _redirectToIdP(): void {
+    const requestId = `_${randomUUID()}`;
     const samlRequest = Buffer.from(
       `<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ` +
-        `ID="_${Date.now()}" Version="2.0" IssueInstant="${new Date().toISOString()}" ` +
+        `ID="${requestId}" Version="2.0" IssueInstant="${new Date().toISOString()}" ` +
         `AssertionConsumerServiceURL="${this._callbackURL}" ` +
         `Issuer="${this._issuer}" />`,
     ).toString('base64');
@@ -219,11 +221,228 @@ export class SAMLStrategy<User = unknown> extends Strategy {
       const xml = Buffer.from(samlResponse, 'base64').toString('utf8');
       const doc = parseXML(xml);
 
+      // Verify XML signature if a certificate is configured.
+      if (this._cert) {
+        this._verifySignature(doc, xml);
+      }
+
       const profile = this._extractProfile(doc);
+
+      // Validate assertion conditions.
+      this._validateAssertion(doc);
 
       await this._callVerify(profile);
     } catch (err) {
       this.error(err as Error);
+    }
+  }
+
+  /**
+   * Verify the XML digital signature on the SAML response or assertion.
+   */
+  private _verifySignature(doc: SAXElement, xml: string): void {
+    const signature = findElement(doc, 'Signature');
+    if (!signature) {
+      throw new Error('No XML Signature found in SAML response');
+    }
+
+    const signedInfo = findElement(signature, 'SignedInfo');
+    if (!signedInfo) {
+      throw new Error('No SignedInfo in SAML Signature');
+    }
+
+    const signatureValueElem = findElement(signature, 'SignatureValue');
+    if (!signatureValueElem?.text) {
+      throw new Error('No SignatureValue in SAML Signature');
+    }
+
+    // Determine the signature algorithm.
+    const signatureMethod = findElement(signedInfo, 'SignatureMethod');
+    const algorithm = signatureMethod?.attrs.Algorithm || '';
+    const nodeAlg = this._mapSignatureAlgorithm(algorithm);
+
+    // Extract the SignedInfo XML from the raw response for verification.
+    // We need the canonical form of SignedInfo.
+    const signedInfoXml = this._extractSignedInfoXml(xml);
+    if (!signedInfoXml) {
+      throw new Error('Could not extract SignedInfo from SAML response');
+    }
+
+    // Verify the signature.
+    const signatureValue = Buffer.from(
+      signatureValueElem.text.replace(/\s+/g, ''),
+      'base64',
+    );
+
+    const cert = this._formatCert(this._cert!);
+    const verifier = createVerify(nodeAlg);
+    verifier.update(signedInfoXml);
+    if (!verifier.verify(cert, signatureValue)) {
+      throw new Error('SAML signature verification failed');
+    }
+
+    // Verify the digest of the referenced content.
+    const reference = findElement(signedInfo, 'Reference');
+    if (reference) {
+      const digestValueElem = findElement(reference, 'DigestValue');
+      const digestMethodElem = findElement(reference, 'DigestMethod');
+      if (digestValueElem?.text && digestMethodElem) {
+        const refUri = reference.attrs.URI || '';
+        this._verifyDigest(doc, xml, refUri, digestValueElem.text, digestMethodElem.attrs.Algorithm || '');
+      }
+    }
+  }
+
+  /**
+   * Verify the digest value of the referenced element.
+   */
+  private _verifyDigest(
+    doc: SAXElement,
+    xml: string,
+    refUri: string,
+    expectedDigest: string,
+    algorithm: string,
+  ): void {
+    const hashAlg = this._mapDigestAlgorithm(algorithm);
+
+    // Find the referenced element by ID.
+    let content: string;
+    if (refUri.startsWith('#')) {
+      const id = refUri.slice(1);
+      const refElement = this._findElementById(doc, id);
+      if (!refElement) {
+        throw new Error(`Referenced element ${refUri} not found`);
+      }
+      // Extract the raw XML of the referenced element (without Signature child).
+      content = this._extractElementXml(xml, refElement.tag, id);
+    } else {
+      // Empty URI means the whole document.
+      content = xml;
+    }
+
+    const hash = createHash(hashAlg);
+    hash.update(content);
+    const computed = hash.digest('base64');
+
+    if (computed !== expectedDigest.replace(/\s+/g, '')) {
+      throw new Error('SAML digest verification failed');
+    }
+  }
+
+  private _findElementById(elem: SAXElement, id: string): SAXElement | undefined {
+    if (elem.attrs.ID === id) return elem;
+    for (const child of elem.children) {
+      const found = this._findElementById(child, id);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  private _extractSignedInfoXml(xml: string): string | null {
+    // Extract the <SignedInfo>...</SignedInfo> block from the raw XML.
+    const re = /<(?:\w+:)?SignedInfo[^>]*>[\s\S]*?<\/(?:\w+:)?SignedInfo>/;
+    const match = xml.match(re);
+    return match ? match[0] : null;
+  }
+
+  private _extractElementXml(xml: string, tag: string, id: string): string {
+    // Extract the element XML by ID attribute, excluding the Signature child.
+    const localTag = tag.includes(':') ? tag.split(':')[1] : tag;
+    const re = new RegExp(`<(?:\\w+:)?${localTag}[^>]*ID="${id}"[^>]*>[\\s\\S]*?<\\/(?:\\w+:)?${localTag}>`);
+    const match = xml.match(re);
+    if (!match) return '';
+    // Remove the Signature element from the content for digest computation.
+    return match[0].replace(/<(?:\w+:)?Signature[^>]*>[\s\S]*?<\/(?:\w+:)?Signature>/, '');
+  }
+
+  private _mapSignatureAlgorithm(uri: string): string {
+    if (uri.includes('rsa-sha256')) return 'RSA-SHA256';
+    if (uri.includes('rsa-sha1')) return 'RSA-SHA1';
+    if (uri.includes('rsa-sha384')) return 'RSA-SHA384';
+    if (uri.includes('rsa-sha512')) return 'RSA-SHA512';
+    // Default to SHA-256 for modern SAML.
+    return 'RSA-SHA256';
+  }
+
+  private _mapDigestAlgorithm(uri: string): string {
+    if (uri.includes('sha256')) return 'sha256';
+    if (uri.includes('sha1')) return 'sha1';
+    if (uri.includes('sha384')) return 'sha384';
+    if (uri.includes('sha512')) return 'sha512';
+    return 'sha256';
+  }
+
+  private _formatCert(cert: string): string {
+    if (cert.includes('-----BEGIN')) return cert;
+    // Wrap raw base64 cert in PEM format.
+    const lines: string[] = [];
+    lines.push('-----BEGIN CERTIFICATE-----');
+    for (let i = 0; i < cert.length; i += 64) {
+      lines.push(cert.slice(i, i + 64));
+    }
+    lines.push('-----END CERTIFICATE-----');
+    return lines.join('\n');
+  }
+
+  /**
+   * Validate SAML assertion conditions (time validity, audience, issuer).
+   */
+  private _validateAssertion(doc: SAXElement): void {
+    const assertion = findElement(doc, 'Assertion');
+    if (!assertion) {
+      throw new Error('No SAML Assertion found in response');
+    }
+
+    // Validate Issuer — the assertion issuer is extracted in _extractProfile
+    // and passed to the verify callback for application-level validation.
+
+    // Validate Conditions (NotBefore / NotOnOrAfter).
+    const conditions = findElement(assertion, 'Conditions');
+    if (conditions) {
+      const now = new Date();
+      const clockSkew = 300_000; // 5 minutes tolerance
+
+      const notBefore = conditions.attrs.NotBefore;
+      if (notBefore) {
+        const nbDate = new Date(notBefore);
+        if (now.getTime() < nbDate.getTime() - clockSkew) {
+          throw new Error(`SAML assertion not yet valid (NotBefore: ${notBefore})`);
+        }
+      }
+
+      const notOnOrAfter = conditions.attrs.NotOnOrAfter;
+      if (notOnOrAfter) {
+        const noaDate = new Date(notOnOrAfter);
+        if (now.getTime() >= noaDate.getTime() + clockSkew) {
+          throw new Error(`SAML assertion has expired (NotOnOrAfter: ${notOnOrAfter})`);
+        }
+      }
+
+      // Validate AudienceRestriction.
+      const audienceRestriction = findElement(conditions, 'AudienceRestriction');
+      if (audienceRestriction) {
+        const audienceElem = findElement(audienceRestriction, 'Audience');
+        if (audienceElem?.text && audienceElem.text !== this._issuer) {
+          throw new Error(
+            `SAML audience mismatch: expected ${this._issuer}, got ${audienceElem.text}`,
+          );
+        }
+      }
+    }
+
+    // Validate SubjectConfirmation NotOnOrAfter.
+    const subject = findElement(assertion, 'Subject');
+    if (subject) {
+      const subjectConfirmation = findElement(subject, 'SubjectConfirmation');
+      if (subjectConfirmation) {
+        const subjectConfData = findElement(subjectConfirmation, 'SubjectConfirmationData');
+        if (subjectConfData?.attrs.NotOnOrAfter) {
+          const noaDate = new Date(subjectConfData.attrs.NotOnOrAfter);
+          if (new Date().getTime() >= noaDate.getTime() + 300_000) {
+            throw new Error('SAML SubjectConfirmation has expired');
+          }
+        }
+      }
     }
   }
 
