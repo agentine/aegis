@@ -8,6 +8,7 @@ import type {
 } from './types.js';
 import { createInitializeMiddleware } from './middleware/initialize.js';
 import { createAuthenticateMiddleware } from './middleware/authenticate.js';
+import { createAuthorizeMiddleware, type AuthorizeOptions } from './middleware/authorize.js';
 import { SessionStrategy } from './session/session-strategy.js';
 
 export class Authenticator<User = unknown> {
@@ -159,5 +160,13 @@ export class Authenticator<User = unknown> {
     }
 
     return createAuthenticateMiddleware(this, strategy, options, callback);
+  }
+
+  /**
+   * Return middleware that authorizes (account linking) without establishing a session.
+   * The authenticated account is stored on req[property] (default: 'account').
+   */
+  authorize(strategy: string, options?: AuthorizeOptions): Middleware {
+    return createAuthorizeMiddleware(this, strategy, options);
   }
 }
