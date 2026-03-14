@@ -182,22 +182,32 @@ export class OIDCStrategy<User = unknown> extends OAuth2Strategy<User> {
       ? keys.find((k) => k.kid === header.kid)
       : keys[0];
 
-    if (key && key.kty === 'RSA' && key.n && key.e) {
-      const alg = header.alg || 'RS256';
-      const nodeAlg = alg === 'RS384' ? 'RSA-SHA384' : alg === 'RS512' ? 'RSA-SHA512' : 'RSA-SHA256';
+    if (!key) {
+      throw new Error(
+        `OIDC id_token signing key not found in JWKS${header.kid ? ` (kid: ${header.kid})` : ''}`,
+      );
+    }
 
-      const publicKey = createPublicKey({
-        key: { kty: key.kty, n: key.n, e: key.e },
-        format: 'jwk',
-      });
+    if (key.kty !== 'RSA' || !key.n || !key.e) {
+      throw new Error(
+        `OIDC id_token uses unsupported key type: ${key.kty} (only RSA is supported)`,
+      );
+    }
 
-      const signatureInput = `${parts[0]}.${parts[1]}`;
-      const signature = Buffer.from(parts[2], 'base64url');
-      const verifier = createVerify(nodeAlg);
-      verifier.update(signatureInput);
-      if (!verifier.verify(publicKey, signature)) {
-        throw new Error('OIDC id_token signature verification failed');
-      }
+    const alg = header.alg || 'RS256';
+    const nodeAlg = alg === 'RS384' ? 'RSA-SHA384' : alg === 'RS512' ? 'RSA-SHA512' : 'RSA-SHA256';
+
+    const publicKey = createPublicKey({
+      key: { kty: key.kty, n: key.n, e: key.e },
+      format: 'jwk',
+    });
+
+    const signatureInput = `${parts[0]}.${parts[1]}`;
+    const signature = Buffer.from(parts[2], 'base64url');
+    const verifier = createVerify(nodeAlg);
+    verifier.update(signatureInput);
+    if (!verifier.verify(publicKey, signature)) {
+      throw new Error('OIDC id_token signature verification failed');
     }
 
     // Validate claims.

@@ -399,6 +399,11 @@ export class SAMLStrategy<User = unknown> extends Strategy {
 
   private _extractSignedInfoXml(xml: string): string | null {
     // Extract the <SignedInfo>...</SignedInfo> block from the raw XML.
+    // LIMITATION: Uses regex instead of proper XML canonicalization (C14N).
+    // This is fragile against XML signature wrapping attacks where an attacker
+    // injects duplicate SignedInfo elements. The digest verification step
+    // mitigates this by independently verifying referenced element content.
+    // Future hardening: implement Exclusive XML Canonicalization (exc-c14n).
     const re = /<(?:\w+:)?SignedInfo[^>]*>[\s\S]*?<\/(?:\w+:)?SignedInfo>/;
     const match = xml.match(re);
     return match ? match[0] : null;
@@ -406,6 +411,10 @@ export class SAMLStrategy<User = unknown> extends Strategy {
 
   private _extractElementXml(xml: string, tag: string, id: string): string {
     // Extract the element XML by ID attribute, excluding the Signature child.
+    // LIMITATION: Uses regex instead of proper XML parsing. Vulnerable to XML
+    // wrapping attacks if an attacker can inject elements with duplicate IDs.
+    // Mitigated by digest verification of referenced content.
+    // Future hardening: use DOM-based extraction with proper C14N.
     const localTag = tag.includes(':') ? tag.split(':')[1] : tag;
     const re = new RegExp(`<(?:\\w+:)?${localTag}[^>]*ID="${id}"[^>]*>[\\s\\S]*?<\\/(?:\\w+:)?${localTag}>`);
     const match = xml.match(re);
