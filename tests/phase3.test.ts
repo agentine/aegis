@@ -409,7 +409,7 @@ describe('SAMLStrategy', () => {
 
   it('should reject unsigned SAML response (cert required)', async () => {
     const samlXml = `
-      <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">
+      <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" Destination="/saml/callback">
         <saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
           <saml:Issuer>https://idp.example.com</saml:Issuer>
           <saml:Subject>
@@ -447,7 +447,7 @@ describe('SAMLStrategy', () => {
   });
 
   it('should error if no Assertion in response', async () => {
-    const samlXml = '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"></samlp:Response>';
+    const samlXml = '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" Destination="/saml/callback"></samlp:Response>';
     const samlResponse = Buffer.from(samlXml).toString('base64');
 
     let errorMsg = '';

@@ -128,8 +128,22 @@ export class OAuth2Strategy<User = unknown> extends Strategy {
       params.set('code_challenge_method', 'S256');
     }
 
+    // Allow subclasses to add extra authorization parameters (e.g. nonce).
+    const extra = this._extraAuthorizationParams(req);
+    for (const [k, v] of Object.entries(extra)) {
+      params.set(k, v);
+    }
+
     const authUrl = `${this._authorizationURL}?${params.toString()}`;
     this.redirect(authUrl);
+  }
+
+  /**
+   * Return extra query parameters for the authorization URL.
+   * Subclasses can override to add protocol-specific params (e.g. OIDC nonce).
+   */
+  protected _extraAuthorizationParams(_req: AegisRequest): Record<string, string> {
+    return {};
   }
 
   /**

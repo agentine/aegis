@@ -151,12 +151,28 @@ export class AppleStrategy<User = unknown> extends OAuth2Strategy<User> {
     }
 
     // Initiating flow — generate nonce and store in session for replay protection.
+    // Apple expects the SHA-256 hash of the nonce in the authorization URL.
     if (req.session) {
       const nonce = randomBytes(16).toString('hex');
       (req.session as Record<string, unknown>)['apple:nonce'] = nonce;
     }
 
     return super.authenticate(req);
+  }
+
+  /**
+   * Include the nonce hash in the authorization URL for Apple.
+   * Apple requires the SHA-256 hash of the nonce in the auth request.
+   */
+  protected _extraAuthorizationParams(req: AegisRequest): Record<string, string> {
+    if (req.session) {
+      const nonce = (req.session as Record<string, unknown>)['apple:nonce'] as string | undefined;
+      if (nonce) {
+        const nonceHash = createHash('sha256').update(nonce).digest('hex');
+        return { nonce: nonceHash, response_mode: 'form_post' };
+      }
+    }
+    return { response_mode: 'form_post' };
   }
 
   /**
@@ -218,7 +234,10 @@ export class AppleStrategy<User = unknown> extends OAuth2Strategy<User> {
       if (req.session) {
         const storedNonce = (req.session as Record<string, unknown>)['apple:nonce'] as string | undefined;
         delete (req.session as Record<string, unknown>)['apple:nonce'];
-        if (storedNonce && payload.nonce) {
+        if (storedNonce) {
+          if (!payload.nonce) {
+            throw new Error('Apple id_token missing nonce claim (possible replay attack)');
+          }
           // Apple includes the SHA-256 hash of the nonce in the id_token.
           const expectedNonceHash = createHash('sha256').update(storedNonce).digest('hex');
           if (String(payload.nonce) !== expectedNonceHash && String(payload.nonce) !== storedNonce) {

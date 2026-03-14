@@ -261,22 +261,35 @@ export class SAMLStrategy<User = unknown> extends Strategy {
       const storedRequestId = (req.session as Record<string, unknown>)['saml:requestId'] as string | undefined;
       delete (req.session as Record<string, unknown>)['saml:requestId'];
 
-      if (storedRequestId && inResponseTo && inResponseTo !== storedRequestId) {
-        throw new Error(
-          `SAML InResponseTo mismatch: expected ${storedRequestId}, got ${inResponseTo}`,
-        );
+      if (storedRequestId) {
+        if (!inResponseTo) {
+          throw new Error(
+            'SAML Response missing InResponseTo attribute (possible unsolicited response)',
+          );
+        }
+        if (inResponseTo !== storedRequestId) {
+          throw new Error(
+            `SAML InResponseTo mismatch: expected ${storedRequestId}, got ${inResponseTo}`,
+          );
+        }
       }
     }
   }
 
   /**
    * Validate Destination attribute matches our ACS URL.
+   * Per SAML Core 3.2.2, Destination is required for HTTP POST binding.
    */
   private _validateDestination(doc: SAXElement): void {
     const response = findElement(doc, 'Response') || doc;
     const destination = response.attrs?.Destination;
 
-    if (destination && destination !== this._callbackURL) {
+    if (!destination) {
+      throw new Error(
+        'SAML Response missing Destination attribute (required for HTTP POST binding)',
+      );
+    }
+    if (destination !== this._callbackURL) {
       throw new Error(
         `SAML Destination mismatch: expected ${this._callbackURL}, got ${destination}`,
       );

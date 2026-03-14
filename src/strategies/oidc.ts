@@ -1,4 +1,4 @@
-import { createPublicKey, createVerify } from 'node:crypto';
+import { createPublicKey, createVerify, randomBytes } from 'node:crypto';
 import {
   OAuth2Strategy,
   type OAuth2Profile,
@@ -112,7 +112,28 @@ export class OIDCStrategy<User = unknown> extends OAuth2Strategy<User> {
     } catch (err) {
       return this.error(err as Error);
     }
+
+    // Generate and store nonce for id_token replay protection (OIDC Core 3.1.3.7).
+    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    if (!url.searchParams.get('code') && req.session) {
+      const nonce = randomBytes(16).toString('hex');
+      (req.session as Record<string, unknown>)['oidc:nonce'] = nonce;
+    }
+
     return super.authenticate(req);
+  }
+
+  /**
+   * Include the stored nonce in the authorization URL for OIDC.
+   */
+  protected _extraAuthorizationParams(req: AegisRequest): Record<string, string> {
+    if (req.session) {
+      const nonce = (req.session as Record<string, unknown>)['oidc:nonce'] as string | undefined;
+      if (nonce) {
+        return { nonce };
+      }
+    }
+    return {};
   }
 
   /**
@@ -126,16 +147,22 @@ export class OIDCStrategy<User = unknown> extends OAuth2Strategy<User> {
 
     // Validate id_token if present in the token response (required by OIDC Core).
     if (tokenData.id_token) {
-      await this._validateIdToken(tokenData.id_token);
+      const storedNonce = req.session
+        ? ((req.session as Record<string, unknown>)['oidc:nonce'] as string | undefined)
+        : undefined;
+      if (req.session) {
+        delete (req.session as Record<string, unknown>)['oidc:nonce'];
+      }
+      await this._validateIdToken(tokenData.id_token, storedNonce);
     }
 
     return tokenData;
   }
 
   /**
-   * Validate the id_token JWT: signature, iss, aud, exp.
+   * Validate the id_token JWT: signature, iss, aud, exp, nonce.
    */
-  private async _validateIdToken(idToken: string): Promise<void> {
+  private async _validateIdToken(idToken: string, storedNonce?: string): Promise<void> {
     const parts = idToken.split('.');
     if (parts.length !== 3) {
       throw new Error('OIDC id_token is not a valid JWT');
@@ -145,29 +172,31 @@ export class OIDCStrategy<User = unknown> extends OAuth2Strategy<User> {
       Buffer.from(parts[0], 'base64url').toString('utf8'),
     ) as { kid?: string; alg?: string };
 
-    // Verify signature if JWKS is available.
-    if (this._jwksUri) {
-      const keys = await this._fetchJWKS();
-      const key = header.kid
-        ? keys.find((k) => k.kid === header.kid)
-        : keys[0];
+    // Verify signature — JWKS URI is required for id_token verification.
+    if (!this._jwksUri) {
+      throw new Error('OIDC provider did not publish a jwks_uri — cannot verify id_token signature');
+    }
 
-      if (key && key.kty === 'RSA' && key.n && key.e) {
-        const alg = header.alg || 'RS256';
-        const nodeAlg = alg === 'RS384' ? 'RSA-SHA384' : alg === 'RS512' ? 'RSA-SHA512' : 'RSA-SHA256';
+    const keys = await this._fetchJWKS();
+    const key = header.kid
+      ? keys.find((k) => k.kid === header.kid)
+      : keys[0];
 
-        const publicKey = createPublicKey({
-          key: { kty: key.kty, n: key.n, e: key.e },
-          format: 'jwk',
-        });
+    if (key && key.kty === 'RSA' && key.n && key.e) {
+      const alg = header.alg || 'RS256';
+      const nodeAlg = alg === 'RS384' ? 'RSA-SHA384' : alg === 'RS512' ? 'RSA-SHA512' : 'RSA-SHA256';
 
-        const signatureInput = `${parts[0]}.${parts[1]}`;
-        const signature = Buffer.from(parts[2], 'base64url');
-        const verifier = createVerify(nodeAlg);
-        verifier.update(signatureInput);
-        if (!verifier.verify(publicKey, signature)) {
-          throw new Error('OIDC id_token signature verification failed');
-        }
+      const publicKey = createPublicKey({
+        key: { kty: key.kty, n: key.n, e: key.e },
+        format: 'jwk',
+      });
+
+      const signatureInput = `${parts[0]}.${parts[1]}`;
+      const signature = Buffer.from(parts[2], 'base64url');
+      const verifier = createVerify(nodeAlg);
+      verifier.update(signatureInput);
+      if (!verifier.verify(publicKey, signature)) {
+        throw new Error('OIDC id_token signature verification failed');
       }
     }
 
@@ -200,6 +229,16 @@ export class OIDCStrategy<User = unknown> extends OAuth2Strategy<User> {
     // exp MUST not be in the past.
     if (typeof payload.exp === 'number' && payload.exp * 1000 < Date.now()) {
       throw new Error('OIDC id_token has expired');
+    }
+
+    // nonce MUST match if we sent one (OIDC Core 3.1.3.7).
+    if (storedNonce) {
+      if (!payload.nonce) {
+        throw new Error('OIDC id_token missing nonce claim (possible replay attack)');
+      }
+      if (String(payload.nonce) !== storedNonce) {
+        throw new Error('OIDC id_token nonce mismatch (possible replay attack)');
+      }
     }
   }
 
