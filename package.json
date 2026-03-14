@@ -18,7 +18,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --import tsx --test 'tests/*.test.ts'",
+    "test": "node --import tsx --test tests/integration.test.ts tests/oauth2.test.ts tests/phase3.test.ts tests/phase4.test.ts",
     "typecheck": "tsc --noEmit",
     "bench": "npx tsx benchmarks/bench.ts"
   },
