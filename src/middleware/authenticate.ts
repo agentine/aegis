@@ -68,6 +68,30 @@ export function createAuthenticateMiddleware(
               req.authInfo = info;
             }
 
+            // Flash message support (requires connect-flash or compatible middleware).
+            if (options.successFlash) {
+              const flash = (req as unknown as { flash?: (type: string, msg: string) => void }).flash;
+              if (flash) {
+                const msg = typeof options.successFlash === 'string'
+                  ? options.successFlash
+                  : (info?.message || 'Logged in');
+                flash('success', msg);
+              }
+            }
+
+            // Session message support (no flash middleware required).
+            if (options.successMessage) {
+              const messages = (req.session as Record<string, unknown>).messages as string[] | undefined;
+              const msg = typeof options.successMessage === 'string'
+                ? options.successMessage
+                : (info?.message || 'Logged in');
+              if (messages) {
+                messages.push(msg);
+              } else {
+                (req.session as Record<string, unknown>).messages = [msg];
+              }
+            }
+
             if (options.successRedirect) {
               res.writeHead(302, { Location: options.successRedirect });
               res.end();
@@ -88,6 +112,34 @@ export function createAuthenticateMiddleware(
             const info = typeof challenge === 'string' ? { message: challenge } : challenge;
             customCallback(null, false, info);
             return;
+          }
+
+          // Flash message support (requires connect-flash or compatible middleware).
+          if (options.failureFlash) {
+            const flash = (req as unknown as { flash?: (type: string, msg: string) => void }).flash;
+            if (flash) {
+              const info = typeof challenge === 'string' ? challenge : challenge?.message;
+              const msg = typeof options.failureFlash === 'string'
+                ? options.failureFlash
+                : (info || 'Authentication failed');
+              flash('error', msg);
+            }
+          }
+
+          // Session message support (no flash middleware required).
+          if (options.failureMessage) {
+            const info = typeof challenge === 'string' ? challenge : challenge?.message;
+            const msg = typeof options.failureMessage === 'string'
+              ? options.failureMessage
+              : (info || 'Authentication failed');
+            if (req.session) {
+              const messages = (req.session as Record<string, unknown>).messages as string[] | undefined;
+              if (messages) {
+                messages.push(msg);
+              } else {
+                (req.session as Record<string, unknown>).messages = [msg];
+              }
+            }
           }
 
           if (options.failureRedirect) {

@@ -1,6 +1,6 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { Strategy } from '../strategy.js';
-import type { AegisRequest, DoneCallback, AuthInfo } from '../types.js';
+import type { AegisRequest, DoneCallback } from '../types.js';
 
 export interface OAuth2Profile {
   provider: string;
@@ -60,6 +60,7 @@ export class OAuth2Strategy<User = unknown> extends Strategy {
   protected _scope: string;
   protected _usePKCE: boolean;
   protected _useState: boolean;
+  protected _passReqToCallback: boolean;
   protected _verify: OAuth2VerifyFn<User>;
 
   constructor(options: OAuth2StrategyOptions, verify: OAuth2VerifyFn<User>) {
@@ -74,6 +75,7 @@ export class OAuth2Strategy<User = unknown> extends Strategy {
       : options.scope || '';
     this._usePKCE = options.pkce !== false; // default: true
     this._useState = options.state !== false; // default: true
+    this._passReqToCallback = options.passReqToCallback || false;
     this._verify = verify;
   }
 
@@ -175,7 +177,7 @@ export class OAuth2Strategy<User = unknown> extends Strategy {
       const profile = await this.userProfile(accessToken);
 
       // Call verify.
-      await this._callVerify(accessToken, refreshToken, profile);
+      await this._callVerify(req, accessToken, refreshToken, profile);
     } catch (err) {
       this.error(err as Error);
     }
@@ -274,36 +276,42 @@ export class OAuth2Strategy<User = unknown> extends Strategy {
    * Call the verify function (supports both callback and async styles).
    */
   private async _callVerify(
+    req: AegisRequest,
     accessToken: string,
     refreshToken: string | undefined,
     profile: OAuth2Profile,
   ): Promise<void> {
-    const verify = this._verify;
+    const verify = this._verify as Function;
 
-    if (verify.length <= 3) {
-      // Async verify(accessToken, refreshToken, profile) => User
-      const user = await (verify as OAuth2VerifyAsync<User>)(accessToken, refreshToken, profile);
+    // Determine arity threshold: passReqToCallback adds 1 extra param.
+    const arityThreshold = this._passReqToCallback ? 4 : 3;
+
+    if (verify.length <= arityThreshold) {
+      // Async verify — returns Promise
+      const args = this._passReqToCallback
+        ? [req, accessToken, refreshToken, profile]
+        : [accessToken, refreshToken, profile];
+      const user = await verify(...args);
       if (!user) {
         return this.fail({ message: 'Authentication failed' });
       }
-      this.success(user);
+      this.success(user as User);
     } else {
-      // Callback verify(accessToken, refreshToken, profile, done)
+      // Callback verify — last arg is done(err, user, info)
       await new Promise<void>((resolve, reject) => {
-        (verify as OAuth2VerifyCallback<User>)(
-          accessToken,
-          refreshToken,
-          profile,
-          (err, result, info) => {
-            if (err) return reject(err);
-            if (result === false || !result) {
-              this.fail(info || { message: 'Authentication failed' });
-              return resolve();
-            }
-            this.success(result, info);
-            resolve();
-          },
-        );
+        const done: DoneCallback<User> = (err, result, info) => {
+          if (err) return reject(err);
+          if (result === false || !result) {
+            this.fail(info || { message: 'Authentication failed' });
+            return resolve();
+          }
+          this.success(result, info);
+          resolve();
+        };
+        const args = this._passReqToCallback
+          ? [req, accessToken, refreshToken, profile, done]
+          : [accessToken, refreshToken, profile, done];
+        verify(...args);
       });
     }
   }
